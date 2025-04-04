@@ -629,7 +629,39 @@ let print_accesses memo grouped_accs =
         M.msg_group Success ?loc:group_loc ~category:Race "Memory location %a (safe)" Memo.pretty memo (msgs safe_accs)
     )
 
+module IG = Graph.Imperative.Graph.Concrete(A)
+
+let build_interference_graph (warn_accs: WarnAccs.t) : IG.t =
+  let graph = IG.create () in
+  let all_accs = AS.elements (WarnAccs.union_all warn_accs) in
+    List.iter(fun acc -> IG.add_vertex graph acc) all_accs;
+    List.iter(fun acc1 ->
+      List.iter(fun acc2 ->
+        if not (A.equal acc1 acc2) && may_race acc1 acc2  then
+          IG.add_edge graph acc1 acc2) all_accs
+          ) all_accs;
+    graph
+
+module DotOutput = struct
+  module G = IG
+  module Dot = Graph.Graphviz.Dot(struct 
+  include G
+        let graph_attributes _ = []
+        let default_vertex_attributes _ = []
+        let vertex_name v =Printf.sprintf "\"%s\"" (A.show v)
+        let vertex_attributes _ = []
+        let default_edge_attributes _ = []
+        let edge_attributes _ = []
+        let get_subgraph _ = None
+      end)
+      let output_graph filename graph =
+        let oc = open_out filename in
+        Dot.output_graph oc graph;
+        close_out oc
+    end
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
   let grouped_accs = group_may_race warn_accs in (* do expensive component finding only once *)
+  let ig = build_interference_graph warn_accs in 
+  DotOutput.output_graph "interference_graph.dot" ig;
   incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
   print_accesses memo grouped_accs
