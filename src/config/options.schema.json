@@ -2789,6 +2789,17 @@
         }
       },
       "additionalProperties": false
+    },
+    "graph_coloring" :{
+      "title" : "graph_coloring",
+      "description": "Enable graph coloring and specify the algorithm to use. Options: false (disable), 'greedy', 'dsatur'.",
+      "type": "string",
+      "enum": [
+        "none",
+        "greedy",
+        "dsatur"
+      ],
+      "default": "none"
     }
   },
   "additionalProperties": false

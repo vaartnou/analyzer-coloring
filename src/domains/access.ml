@@ -642,26 +642,83 @@ let build_interference_graph (warn_accs: WarnAccs.t) : IG.t =
           ) all_accs;
     graph
 
+module GraphColoring = struct
+  module ColorMap = Map.Make(A)
+
+  type coloring = int ColorMap.t
+
+  (*Greedy coloring algorithm *)
+  let greedy_coloring(graph: IG.t) : coloring = 
+  let vertices = IG.fold_vertex (fun v acc -> v::acc) graph [] in
+  let rec assign_colors nodes coloring = 
+    match nodes with 
+    | [] -> coloring
+    | node :: rest ->
+      let neighbors = IG.succ graph node in
+      let used_colors = List.fold_left(fun acc neighbor ->
+        match ColorMap.find_opt neighbor coloring with
+        | Some color -> color :: acc
+        | None -> acc 
+        ) [] neighbors in 
+        (* Find the first available color*)
+        let rec find_color c =
+          if List.mem c used_colors then find_color (c + 1)
+          else c
+        in
+        let color = find_color 1 in
+        assign_colors rest (ColorMap.add node color coloring)
+      in
+      assign_colors vertices ColorMap.empty
+
+
+  let group_by_color (coloring: coloring) : (int * A.t list) list =
+  ColorMap.fold (fun node color acc ->
+    let group = try List.assoc color acc with Not_found -> [] in
+      (color,node:: group) :: List.remove_assoc color acc 
+      ) coloring []
+end
+
 module DotOutput = struct
   module G = IG
+  let current_coloring = ref None
   module Dot = Graph.Graphviz.Dot(struct 
-  include G
-        let graph_attributes _ = []
-        let default_vertex_attributes _ = []
-        let vertex_name v =Printf.sprintf "\"%s\"" (A.show v)
-        let vertex_attributes _ = []
-        let default_edge_attributes _ = []
-        let edge_attributes _ = []
-        let get_subgraph _ = None
-      end)
-      let output_graph filename graph =
-        let oc = open_out filename in
-        Dot.output_graph oc graph;
-        close_out oc
-    end
+    include G
+      let graph_attributes _ = []
+      let default_vertex_attributes _ = []
+      let vertex_name v =Printf.sprintf "\"%s\"" (A.show v)
+      let vertex_attributes v = 
+        match !current_coloring with
+        | Some coloring -> (
+          match GraphColoring.ColorMap.find_opt v coloring with 
+        | Some color -> [`Style `Filled; `Fillcolor (color * 123456 mod 0xffffff)]
+        | None -> []
+        )
+        | None -> []
+        
+      let default_edge_attributes _ = []
+      let edge_attributes _ = []
+      let get_subgraph _ = None
+    end)
+
+      
+
+  let output_graph ?(coloring=None) filename graph =
+    current_coloring := coloring;
+    let oc = open_out filename in
+    Dot.output_graph oc graph;
+    close_out oc;
+    current_coloring := None
+end
+
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
   let grouped_accs = group_may_race warn_accs in (* do expensive component finding only once *)
-  let ig = build_interference_graph warn_accs in 
-  DotOutput.output_graph "interference_graph.dot" ig;
+  let ig = build_interference_graph warn_accs in
+  
+  let coloring = 
+    match get_string "graph_coloring" with 
+    | "greedy" -> Some (GraphColoring.greedy_coloring ig)
+    | _ -> None
+  in
+  DotOutput.output_graph ~coloring "interference_graph.dot" ig;
   incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
   print_accesses memo grouped_accs
