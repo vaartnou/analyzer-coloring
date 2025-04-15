@@ -2797,7 +2797,8 @@
       "enum": [
         "none",
         "greedy",
-        "dsatur"
+        "dsatur",
+        "brute_force"
       ],
       "default": "none"
     }

@@ -642,41 +642,80 @@ let build_interference_graph (warn_accs: WarnAccs.t) : IG.t =
           ) all_accs;
     graph
 
-module GraphColoring = struct
-  module ColorMap = Map.Make(A)
 
-  type coloring = int ColorMap.t
+module GraphColoring(G: Graph.Sig.G) = struct
+  module C = Graph.Coloring.Make(G)
 
-  (*Greedy coloring algorithm *)
-  let greedy_coloring(graph: IG.t) : coloring = 
-  let vertices = IG.fold_vertex (fun v acc -> v::acc) graph [] in
-  let rec assign_colors nodes coloring = 
-    match nodes with 
-    | [] -> coloring
-    | node :: rest ->
-      let neighbors = IG.succ graph node in
-      let used_colors = List.fold_left(fun acc neighbor ->
-        match ColorMap.find_opt neighbor coloring with
-        | Some color -> color :: acc
-        | None -> acc 
-        ) [] neighbors in 
-        (* Find the first available color*)
-        let rec find_color c =
-          if List.mem c used_colors then find_color (c + 1)
-          else c
-        in
-        let color = find_color 1 in
-        assign_colors rest (ColorMap.add node color coloring)
+  type coloring = int C.H.t
+
+
+  let greedy_coloring graph : coloring =
+    let vertices = ref [] in
+    G.iter_vertex (fun v -> vertices := v :: !vertices) graph;
+    
+    let coloring = C.H.create (List.length !vertices) in
+    
+    List.iter (fun v ->
+      (* Get all neighbors of the current vertex *)
+      let neighbors = G.succ graph v in
+      
+      (* Collect colors already used by neighbors *)
+      let used_colors = List.fold_left (fun acc neighbor ->
+        try 
+          let color = C.H.find coloring neighbor in
+          color :: acc
+        with Not_found -> 
+          acc
+      ) [] neighbors in
+      
+      (* Find the first available color not used by any neighbor *)
+      let rec find_available_color c =
+        if List.mem c used_colors then
+          find_available_color (c + 1)
+        else
+          c
       in
-      assign_colors vertices ColorMap.empty
+      
+      (* Assign the smallest available color to the vertex *)
+      let color = find_available_color 1 in
+      C.H.add coloring v color
+    ) !vertices;
+      coloring
 
+    let brute_force graph : coloring =
+      let rec try_with_k k =
+        try C.coloring graph k
+      with
+      | Graph.Coloring.NoColoring ->
+        try_with_k (k + 1)
+      | _ -> 
+        failwith "No coloring found"
+      in
+      try_with_k 1
 
-  let group_by_color (coloring: coloring) : (int * A.t list) list =
-  ColorMap.fold (fun node color acc ->
-    let group = try List.assoc color acc with Not_found -> [] in
-      (color,node:: group) :: List.remove_assoc color acc 
-      ) coloring []
+    let group_by_color (coloring: coloring) : (int * G.V.t list) list = 
+      let color_groups = Hashtbl.create 10 in
+    
+    (* Collect vertices with the same color *)
+      C.H.iter (fun vertex color ->
+        let current = 
+          try Hashtbl.find color_groups color
+          with Not_found -> []
+        in
+        Hashtbl.replace color_groups color (vertex :: current)
+      ) coloring;
+    
+    (* Convert the hashtable to a list of (color, vertices) pairs *)
+      let result = ref [] in
+      Hashtbl.iter (fun color vertices ->
+        result := (color, vertices) :: !result
+      ) color_groups;
+    
+      (* Sort by color for consistent output *)
+      List.sort (fun (c1, _) (c2, _) -> compare c1 c2) !result
 end
+
+module GC = GraphColoring(IG)
 
 module DotOutput = struct
   module G = IG
@@ -689,7 +728,7 @@ module DotOutput = struct
       let vertex_attributes v = 
         match !current_coloring with
         | Some coloring -> (
-          match GraphColoring.ColorMap.find_opt v coloring with 
+          match GC.C.H.find_opt coloring v with 
         | Some color -> [`Style `Filled; `Fillcolor (color * 123456 mod 0xffffff)]
         | None -> []
         )
@@ -744,7 +783,7 @@ let print_colored_accesses memo grouped_accs coloring =
     let header = dprintf "Memory location %a (race with conf. %d):" Memo.pretty memo max_conf in
     
     (* Group accesses by color *)
-    let color_groups = GraphColoring.group_by_color coloring in
+    let color_groups = GC.group_by_color coloring in
     
     (* Create messages for each color group that participates in races *)
     let group_msgs = 
@@ -771,14 +810,30 @@ let print_colored_accesses memo grouped_accs coloring =
     M.msg_group severity ?loc:group_loc ~category:Race "%t" (fun () -> header) group_msgs;
   end
 
+
+
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
   let grouped_accs = group_may_race warn_accs in (* do expensive component finding only once *)
   let ig = build_interference_graph warn_accs in
+
   
   match get_string "graph_coloring" with 
   | "greedy" ->
     (* Apply graph coloring algorithm *)
-    let coloring =  GraphColoring.greedy_coloring ig in
+    let coloring =  GC.greedy_coloring ig in
+    
+    (* Output the graph visualization *)
+    DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
+    
+    (* Display colored access groups *)
+    print_colored_accesses memo grouped_accs coloring;
+    
+    (* Update summary counters *)
+    incr_summary ~safe ~vulnerable ~unsafe grouped_accs
+
+  | "brute_force" ->
+    (* Apply brute force graph coloring algorithm *)
+    let coloring =  GC.brute_force ig in
     
     (* Output the graph visualization *)
     DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
@@ -790,7 +845,5 @@ let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
     incr_summary ~safe ~vulnerable ~unsafe grouped_accs
     
   | _ ->
-    (* Standard handling without coloring *)
-    DotOutput.output_graph "interference_graph.dot" ig;
     incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
     print_accesses memo grouped_accs
