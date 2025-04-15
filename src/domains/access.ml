@@ -710,15 +710,87 @@ module DotOutput = struct
     current_coloring := None
 end
 
+let print_colored_accesses memo grouped_accs coloring =
+  let race_threshold = get_int "warn.race-threshold" in
+  
+  (* Track which accesses are part of a race *)
+  let race_accesses = ref (AS.empty ()) in
+  
+  (* First, determine the maximum confidence for the overall location *)
+  let max_conf = 
+    List.fold_left (fun max_conf_so_far accs ->
+      match race_conf accs with
+      | Some conf when conf > max_conf_so_far -> 
+          race_accesses := AS.union !race_accesses accs;
+          conf
+      | _ -> max_conf_so_far
+    ) 0 grouped_accs
+  in
+  
+  (* Output warning with groups if there are races *)
+  if max_conf > 0 then begin
+    let severity = 
+      if max_conf >= race_threshold then Messages.Severity.Warning
+      else Messages.Severity.Info
+    in
+    
+    (* Get location for the message group *)
+    let group_loc = match memo with
+      | (`Var v, _) -> Some (M.Location.CilLocation v.vdecl)
+      | (`Type _, _) -> None
+    in
+    
+    (* Create message header *)
+    let header = dprintf "Memory location %a (race with conf. %d):" Memo.pretty memo max_conf in
+    
+    (* Group accesses by color *)
+    let color_groups = GraphColoring.group_by_color coloring in
+    
+    (* Create messages for each color group that participates in races *)
+    let group_msgs = 
+      List.mapi (fun idx (color, accs) ->
+        let race_accs_in_group = List.filter (fun acc -> AS.mem acc !race_accesses) accs in
+        if race_accs_in_group = [] then None else
+        
+        let msgs = 
+          List.map (fun A.{conf; kind; node; exp; acc} ->
+            let doc = dprintf "  %a with %a (conf. %d)  (exp: %a)" 
+              AccessKind.pretty kind MCPAccess.A.pretty acc conf d_exp exp in
+            (doc, Some (Messages.Location.Node node))
+          ) race_accs_in_group
+        in
+        
+        (* Group header followed by access messages *)
+        let group_header = dprintf "Safe group %d:" (idx + 1) in
+        Some ((group_header, None) :: msgs)
+      ) color_groups
+      |> List.filter_map (fun x -> x)
+      |> List.flatten
+    in
+    
+    M.msg_group severity ?loc:group_loc ~category:Race "%t" (fun () -> header) group_msgs;
+  end
+
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
   let grouped_accs = group_may_race warn_accs in (* do expensive component finding only once *)
   let ig = build_interference_graph warn_accs in
   
-  let coloring = 
-    match get_string "graph_coloring" with 
-    | "greedy" -> Some (GraphColoring.greedy_coloring ig)
-    | _ -> None
-  in
-  DotOutput.output_graph ~coloring "interference_graph.dot" ig;
-  incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
-  print_accesses memo grouped_accs
+  match get_string "graph_coloring" with 
+  | "greedy" ->
+    (* Apply graph coloring algorithm *)
+    let coloring =  GraphColoring.greedy_coloring ig in
+    
+    (* Output the graph visualization *)
+    DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
+    
+    (* Display colored access groups *)
+    print_colored_accesses memo grouped_accs coloring;
+    
+    (* Update summary counters *)
+    incr_summary ~safe ~vulnerable ~unsafe grouped_accs
+    
+  | _ ->
+    (* Standard handling without coloring *)
+    DotOutput.output_graph "interference_graph.dot" ig;
+    incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
+    print_accesses memo grouped_accs
