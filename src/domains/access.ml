@@ -811,39 +811,38 @@ let print_colored_accesses memo grouped_accs coloring =
   end
 
 
+type coloring_alorithm_choice = 
+  | Greedy
+  | BruteForce
+  | None
+
+  let algorithm_choice_of_string s =
+    match String.lowercase_ascii s with
+    | "greedy" -> Greedy
+    | "brute_force" -> BruteForce
+    | _ -> None
+
 
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
   let grouped_accs = group_may_race warn_accs in (* do expensive component finding only once *)
   let ig = build_interference_graph warn_accs in
 
-  
-  match get_string "graph_coloring" with 
-  | "greedy" ->
-    (* Apply graph coloring algorithm *)
-    let coloring =  GC.greedy_coloring ig in
-    
-    (* Output the graph visualization *)
+  let chosen_algorithm = algorithm_choice_of_string (get_string "graph_coloring") in
+
+  match chosen_algorithm with 
+  | Greedy ->
+    let coloring = GC.greedy_coloring ig in
     DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
-    
-    (* Display colored access groups *)
     print_colored_accesses memo grouped_accs coloring;
-    
-    (* Update summary counters *)
     incr_summary ~safe ~vulnerable ~unsafe grouped_accs
 
-  | "brute_force" ->
-    (* Apply brute force graph coloring algorithm *)
-    let coloring =  GC.brute_force ig in
-    
-    (* Output the graph visualization *)
+  | BruteForce ->
+    let coloring = GC.brute_force ig in (* Assuming renamed function in GC *)
     DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
-    
-    (* Display colored access groups *)
     print_colored_accesses memo grouped_accs coloring;
-    
-    (* Update summary counters *)
     incr_summary ~safe ~vulnerable ~unsafe grouped_accs
-    
-  | _ ->
-    incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
-    print_accesses memo grouped_accs
+  | None ->
+      DotOutput.output_graph "interference_graph.dot" ig; (* Output uncolored graph *)
+      incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
+      print_accesses memo grouped_accs
+    (* No coloring algorithm chosen, just print the accesses without coloring *)
