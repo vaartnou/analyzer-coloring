@@ -816,11 +816,11 @@ type coloring_alorithm_choice =
   | BruteForce
   | None
 
-  let algorithm_choice_of_string s =
-    match String.lowercase_ascii s with
-    | "greedy" -> Greedy
-    | "brute_force" -> BruteForce
-    | _ -> None
+let algorithm_choice_of_string s =
+  match String.lowercase_ascii s with
+  | "greedy" -> Greedy
+  | "brute_force" -> BruteForce
+  | _ -> None
 
 
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
@@ -842,7 +842,6 @@ let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
     print_colored_accesses memo grouped_accs coloring;
     incr_summary ~safe ~vulnerable ~unsafe grouped_accs
   | None ->
-      DotOutput.output_graph "interference_graph.dot" ig; (* Output uncolored graph *)
-      incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
-      print_accesses memo grouped_accs
-    (* No coloring algorithm chosen, just print the accesses without coloring *)
+    DotOutput.output_graph "interference_graph.dot" ig; (* Output uncolored graph *)
+    incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
+    print_accesses memo grouped_accs
