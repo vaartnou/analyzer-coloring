@@ -2798,6 +2798,7 @@
         "none",
         "greedy",
         "dsatur",
+        "rlf",
         "brute_force"
       ],
       "default": "none"

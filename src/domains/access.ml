@@ -646,78 +646,76 @@ let build_interference_graph (warn_accs: WarnAccs.t) : IG.t =
 module GraphColoring(G: Graph.Sig.G) = struct
   module C = Graph.Coloring.Make(G)
   module IntSet = Set.Make(struct type t = int let compare = compare end)
-
+  module VS = Set.Make(G.V) (* Vertex Set module *)
 
   type coloring = int C.H.t
 
   let dsatur_coloring graph : coloring =
     let n = G.nb_vertex graph in
     let result_coloring = C.H.create n in (* Stores the final vertex -> color mapping *)
+    let saturation_color_sets = C.H.create n in (* For each uncolored v, stores colors of its colored neighbors *)
+    let original_degrees = C.H.create n in (* Stores original degree of each vertex for tie-breaking *)
     
-    (* Stores for each uncolored vertex, the set of colors used by its *already colored* neighbors *)
-    let saturation_color_sets = C.H.create n in 
-    
-    (* Stores the original degree of each vertex for tie-breaking *)
-    let original_degrees = C.H.create n in
-    
-    let uncolored_vertices = ref [] in
+    let uncolored_vertices_set = ref VS.empty in (* Set of uncolored vertices *)
 
-      (* Initialize data structures *)
-      G.iter_vertex (fun v ->
-        C.H.add saturation_color_sets v IntSet.empty;
-        C.H.add original_degrees v (G.out_degree graph v);
-        uncolored_vertices := v :: !uncolored_vertices
-      ) graph;
+    (* Initialize data structures *)
+    G.iter_vertex (fun v ->
+      C.H.add saturation_color_sets v IntSet.empty;
+      C.H.add original_degrees v (G.out_degree graph v);
+      uncolored_vertices_set := VS.add v !uncolored_vertices_set
+    ) graph;
 
     let get_saturation_degree v_node =
       try IntSet.cardinal (C.H.find saturation_color_sets v_node)
-      with Not_found -> 0 (* Should not happen if v_node is from uncolored_vertices *)
+      with Not_found -> 0 (* Should only be called for uncolored vertices *)
     in
     let get_original_degree v_node =
       try C.H.find original_degrees v_node
-      with Not_found -> 0 (* Should not happen *)
+      with Not_found -> 0 (* Should be populated for all vertices *)
     in
-    while !uncolored_vertices <> [] do
-      (* v = MaxSaturation(V): Select vertex with max saturation degree.
-          Tie-breaking: use max original degree. *)
-      let best_v =
-        List.fold_left (fun current_best_v candidate_v ->
+    
+    while not (VS.is_empty !uncolored_vertices_set) do
+      (* Select vertex with max saturation degree. Tie-breaking: use max original degree. *)
+      let best_v_opt = 
+        VS.fold (fun candidate_v acc_opt ->
           let sat_candidate = get_saturation_degree candidate_v in
-          let sat_current_best = get_saturation_degree current_best_v in
-          
-          if sat_candidate > sat_current_best then
-            candidate_v
-          else if sat_candidate < sat_current_best then
-            current_best_v
-          else (* Saturation degrees are equal, use original degree for tie-breaking *)
-            if get_original_degree candidate_v > get_original_degree current_best_v then
-              candidate_v
-            else
-              current_best_v
-        ) (List.hd !uncolored_vertices) (List.tl !uncolored_vertices)
+          let orig_deg_candidate = get_original_degree candidate_v in
+          match acc_opt with
+          | None -> Some (candidate_v, sat_candidate, orig_deg_candidate)
+          | Some (_current_best_v, sat_current_best, orig_deg_current_best) ->
+            if sat_candidate > sat_current_best then
+              Some (candidate_v, sat_candidate, orig_deg_candidate)
+            else if sat_candidate < sat_current_best then
+              acc_opt
+            else (* Saturation degrees are equal, use original degree for tie-breaking *)
+              if orig_deg_candidate > orig_deg_current_best then
+                Some (candidate_v, sat_candidate, orig_deg_candidate)
+              else
+                acc_opt
+        ) !uncolored_vertices_set None
+      in
+      
+      let best_v = 
+        match best_v_opt with 
+        | Some (v, _, _) -> v
+        | None -> failwith "DSatur: uncolored_vertices_set was non-empty but no best_v found" (* Should not happen *)
       in
 
-    (* Determine the color for best_v.
-        if NotColored(v) then Si+1 = NewClass AssignClass(v, Si+1) ... *)
-    let forbidden_colors_for_best_v = C.H.find saturation_color_sets best_v in
-    let rec find_smallest_available_color c set =
-      if IntSet.mem c set then
-        find_smallest_available_color (c + 1) set
-      else
-        c
-    in
-    let color_to_assign = find_smallest_available_color 1 forbidden_colors_for_best_v in
+      (* Determine the color for best_v *)
+      let forbidden_colors_for_best_v = C.H.find saturation_color_sets best_v in
+      let rec find_smallest_available_color c set =
+        if IntSet.mem c set then find_smallest_available_color (c + 1) set else c
+      in
+      let color_to_assign = find_smallest_available_color 1 forbidden_colors_for_best_v in
 
-      (* AssignClass(v, Si or Si+1) *)
+      (* Assign color and update data structures *)
       C.H.add result_coloring best_v color_to_assign;
-
-      (* Remove(v, V) *)
-      uncolored_vertices := List.filter (fun v_node -> not (G.V.equal v_node best_v)) !uncolored_vertices;
-      C.H.remove saturation_color_sets best_v; (* No longer need its saturation set *)
+      uncolored_vertices_set := VS.remove best_v !uncolored_vertices_set;
+      C.H.remove saturation_color_sets best_v; (* No longer need its saturation set as it's colored *)
 
       (* Update saturation_color_sets for uncolored neighbors of best_v *)
       List.iter (fun neighbor_of_best_v ->
-        if C.H.mem saturation_color_sets neighbor_of_best_v then (* if neighbor is still uncolored *)
+        if VS.mem neighbor_of_best_v !uncolored_vertices_set then (* if neighbor is still uncolored *)
           let current_neighbor_sat_set = C.H.find saturation_color_sets neighbor_of_best_v in
           let updated_neighbor_sat_set = IntSet.add color_to_assign current_neighbor_sat_set in
           C.H.replace saturation_color_sets neighbor_of_best_v updated_neighbor_sat_set
@@ -725,39 +723,29 @@ module GraphColoring(G: Graph.Sig.G) = struct
     done;
     result_coloring
 
-
   let greedy_coloring graph : coloring =
-    let vertices = ref [] in
-    G.iter_vertex (fun v -> vertices := v :: !vertices) graph;
-    
-    let coloring = C.H.create (List.length !vertices) in
-    
-    List.iter (fun v ->
-      (* Get all neighbors of the current vertex *)
-      let neighbors = G.succ graph v in
-      
-      (* Collect colors already used by neighbors *)
-      let used_colors = List.fold_left (fun acc neighbor ->
-        try 
-          let color = C.H.find coloring neighbor in
-          color :: acc
-        with Not_found -> 
-          acc
-      ) [] neighbors in
-      
-      (* Find the first available color not used by any neighbor *)
-      let rec find_available_color c =
-        if List.mem c used_colors then
-          find_available_color (c + 1)
+    let coloring = C.H.create (G.nb_vertex graph) in
+    let find_smallest_available_color used_colors =
+      let rec find_color c =
+        if IntSet.mem c used_colors then
+          find_color (c + 1)
         else
           c
       in
-      
-      (* Assign the smallest available color to the vertex *)
-      let color = find_available_color 1 in
-      C.H.add coloring v color
-    ) !vertices;
-      coloring
+      find_color 1
+    in
+    G.iter_vertex (fun v ->
+      let neighbor_colors =
+        G.fold_succ (fun neighbor acc ->
+          match C.H.find_opt coloring neighbor with
+          | Some color -> IntSet.add color acc
+          | None -> acc
+        ) graph v IntSet.empty
+      in
+      let color_to_assign = find_smallest_available_color neighbor_colors in
+      C.H.add coloring v color_to_assign
+    ) graph;
+    coloring
 
     let brute_force graph : coloring =
       let rec try_with_k k =
@@ -769,6 +757,82 @@ module GraphColoring(G: Graph.Sig.G) = struct
         failwith "No coloring found"
       in
       try_with_k 1
+
+    let rlf_coloring graph : coloring =
+      let result_coloring = C.H.create (G.nb_vertex graph) in
+      let uncolored_vertices_set = ref (G.fold_vertex (fun v acc -> VS.add v acc) graph VS.empty) in
+      let current_color = ref 0 in
+
+      (* Helper: count neighbors of v that are in a given set *)
+      let count_neighbors_in_set v set =
+        let count = ref 0 in
+        List.iter (fun neighbor ->
+          if VS.mem neighbor set then incr count
+        ) (G.succ graph v);
+        !count
+      in
+
+      while not (VS.is_empty !uncolored_vertices_set) do
+        incr current_color;
+        let current_independent_set = ref VS.empty in
+
+        (* Select v from U (uncolored_vertices_set) with max degree in U *)
+        let first_vertex_opt =
+          VS.fold (fun candidate_v acc_opt ->
+            let degree_candidate = count_neighbors_in_set candidate_v !uncolored_vertices_set in
+            match acc_opt with
+            | None -> Some (candidate_v, degree_candidate)
+            | Some (_, best_degree) ->
+              if degree_candidate > best_degree then Some (candidate_v, degree_candidate)
+              else acc_opt
+          ) !uncolored_vertices_set None
+        in
+
+        match first_vertex_opt with
+        | None -> () (* Should be caught by the while loop condition, U is not empty *)
+        | Some (v_selected, _) ->
+          current_independent_set := VS.add v_selected !current_independent_set;
+          uncolored_vertices_set := VS.remove v_selected !uncolored_vertices_set;
+
+          (* Cand = U - N(v_selected) where N is in current U *)
+          let candidates_for_S_k = ref !uncolored_vertices_set in
+          List.iter (fun neighbor_of_v ->
+            candidates_for_S_k := VS.remove neighbor_of_v !candidates_for_S_k
+          ) (G.succ graph v_selected); (* G.succ gives all neighbors, filter by !candidates_for_S_k if needed, but removing non-members is fine *)
+
+
+          while not (VS.is_empty !candidates_for_S_k) do
+            (* Select u from Cand with max degree in U (current !uncolored_vertices_set) *)
+            let next_u_in_S_k_opt =
+              VS.fold (fun candidate_u acc_opt ->
+                let degree_candidate = count_neighbors_in_set candidate_u !uncolored_vertices_set in
+                match acc_opt with
+                | None -> Some (candidate_u, degree_candidate)
+                | Some (_, best_degree) ->
+                  if degree_candidate > best_degree then Some (candidate_u, degree_candidate)
+                  else acc_opt
+              ) !candidates_for_S_k None
+            in
+
+            match next_u_in_S_k_opt with
+            | None -> candidates_for_S_k := VS.empty (* No more candidates can be added *)
+            | Some (u_selected, _) ->
+              current_independent_set := VS.add u_selected !current_independent_set;
+              uncolored_vertices_set := VS.remove u_selected !uncolored_vertices_set;
+
+              (* Remove u and N(u) from Cand *)
+              candidates_for_S_k := VS.remove u_selected !candidates_for_S_k;
+              List.iter (fun neighbor_of_u ->
+                candidates_for_S_k := VS.remove neighbor_of_u !candidates_for_S_k
+              ) (G.succ graph u_selected);
+          done;
+
+          (* Assign color k to S_k *)
+          VS.iter (fun vertex_in_S_k ->
+            C.H.add result_coloring vertex_in_S_k !current_color
+          ) !current_independent_set;
+      done;
+      result_coloring
 
     let group_by_color (coloring: coloring) : (int * G.V.t list) list = 
       let color_groups = Hashtbl.create 10 in
@@ -790,40 +854,40 @@ module GraphColoring(G: Graph.Sig.G) = struct
     
       (* Sort by color for consistent output *)
       List.sort (fun (c1, _) (c2, _) -> compare c1 c2) !result
-end
+end (* End of GraphColoring functor *)
 
 module GC = GraphColoring(IG)
 
 module DotOutput = struct
   module G = IG
-  let current_coloring = ref None
-  module Dot = Graph.Graphviz.Dot(struct 
-    include G
+
+  (* Functor to create a Dot module with specific coloring *)
+  module MakeDot (ColoringArg : sig val coloring_map : GC.coloring option end) = struct
+    module Dot = Graph.Graphviz.Dot(struct
+      include G
       let graph_attributes _ = []
       let default_vertex_attributes _ = []
-      let vertex_name v =Printf.sprintf "\"%s\"" (A.show v)
-      let vertex_attributes v = 
-        match !current_coloring with
-        | Some coloring -> (
-          match GC.C.H.find_opt coloring v with 
-        | Some color -> [`Style `Filled; `Fillcolor (color * 123456 mod 0xffffff)]
-        | None -> []
+      let vertex_name v = Printf.sprintf "\"%s\"" (A.show v)
+      let vertex_attributes v =
+        match ColoringArg.coloring_map with
+        | Some cmap -> (
+          match GC.C.H.find_opt cmap v with
+          | Some color -> [`Style `Filled; `Fillcolor (color * 123456 mod 0xffffff)]
+          | None -> []
         )
         | None -> []
-        
       let default_edge_attributes _ = []
       let edge_attributes _ = []
       let get_subgraph _ = None
     end)
+  end
 
-      
-
-  let output_graph ?(coloring=None) filename graph =
-    current_coloring := coloring;
+  let output_graph ?(coloring: GC.coloring option = None) filename graph =
+    (* Create the Dot module instance with the provided coloring *)
+    let module CurrentDot = MakeDot(struct let coloring_map = coloring end) in
     let oc = open_out filename in
-    Dot.output_graph oc graph;
-    close_out oc;
-    current_coloring := None
+    CurrentDot.Dot.output_graph oc graph;
+    close_out oc
 end
 
 let print_colored_accesses memo grouped_accs coloring =
@@ -892,6 +956,7 @@ type coloring_alorithm_choice =
   | Greedy
   | BruteForce
   | DSatur
+  | RLF
   | None
 
 let algorithm_choice_of_string s =
@@ -899,32 +964,49 @@ let algorithm_choice_of_string s =
   | "greedy" -> Greedy
   | "brute_force" -> BruteForce
   | "dsatur" -> DSatur
+  | "rlf" -> RLF
   | _ -> None
 
 
 let warn_global ~safe ~vulnerable ~unsafe warn_accs memo =
-  let grouped_accs = group_may_race warn_accs in (* do expensive component finding only once *)
+  let grouped_accs = group_may_race warn_accs in
+
+  
+  incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
+
+  if WarnAccs.is_empty warn_accs then () else
+
   let ig = build_interference_graph warn_accs in
+  let v_loc = IG.nb_vertex ig in
+
+  if v_loc = 0 then () else
+
+  let memo_id_str = Memo.show memo in
+  let memo_id_for_filename = Str.global_replace (Str.regexp "[^a-zA-Z0-9_.-]") "_" memo_id_str in
 
   let chosen_algorithm = algorithm_choice_of_string (get_string "graph_coloring") in
 
-  match chosen_algorithm with 
-  | Greedy ->
-    let coloring = Timing.wrap "coloring" GC.greedy_coloring ig in
-    DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
-    print_colored_accesses memo grouped_accs coloring;
-    incr_summary ~safe ~vulnerable ~unsafe grouped_accs
-  | DSatur ->
-    let coloring = Timing.wrap "coloring" GC.dsatur_coloring ig in
-    DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
-    print_colored_accesses memo grouped_accs coloring;
-    incr_summary ~safe ~vulnerable ~unsafe grouped_accs
-  | BruteForce ->
-    let coloring = Timing.wrap "coloring" GC.brute_force ig in (* Assuming renamed function in GC *)
-    DotOutput.output_graph ~coloring:(Some coloring) "interference_graph.dot" ig;
-    print_colored_accesses memo grouped_accs coloring;
-    incr_summary ~safe ~vulnerable ~unsafe grouped_accs
-  | None ->
-    DotOutput.output_graph "interference_graph.dot" ig; (* Output uncolored graph *)
-    incr_summary ~safe ~vulnerable ~unsafe grouped_accs;
+  (match chosen_algorithm with
+  | None -> 
+    let dot_filename = Printf.sprintf "interference_graph_%s.dot" memo_id_for_filename in
+    DotOutput.output_graph dot_filename ig;
+    (* Call original print_accesses when no coloring is done *)
     print_accesses memo grouped_accs
+  | Greedy | DSatur | BruteForce | RLF ->
+    let coloring_function =
+      match chosen_algorithm with
+      | Greedy -> GC.greedy_coloring
+      | DSatur -> GC.dsatur_coloring
+      | BruteForce -> GC.brute_force
+      | RLF -> GC.rlf_coloring
+      | None -> failwith "Impossible: None case already handled"
+    in
+    let coloring = Timing.wrap "coloring" coloring_function ig in
+
+    let dot_filename = Printf.sprintf "colored_graph_%s.dot" memo_id_for_filename in
+    DotOutput.output_graph ~coloring:(Some coloring) dot_filename ig;
+    
+    (* Call print_colored_accesses when coloring is done *)
+    print_colored_accesses memo grouped_accs coloring;
+    ()
+  )
